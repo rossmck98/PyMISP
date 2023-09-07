@@ -1,0 +1,461 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import re
+import requests, json, os
+import elasticsearch
+from elasticsearch import Elasticsearch
+import json
+from pymisp import ExpandedPyMISP
+from keys import misp_url, misp_key, misp_verifycert
+try:
+    from keys import misp_client_cert
+except ImportError:
+    misp_client_cert = ''
+import argparse
+import os
+from datetime import date
+
+
+
+
+# Usage for pipe masters: ./last.py -l 5h | jq .
+# Usage in case of large data set and pivoting page by page: python3 last.py  -l 48h  -m 10 -p 2  | jq .[].Event.info
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Download latest events from a MISP instance.')
+    parser.add_argument("-l", "--last", required=True, help="can be defined in days, hours, minutes (for example 5d or 12h or 30m).")
+    parser.add_argument("-m", "--limit", required=False, default="10", help="Add the limit of records to get (by default, the limit is set to 10)")
+    parser.add_argument("-p", "--page", required=False, default="1", help="Add the page to request to paginate over large dataset (by default page is set to 1)")
+    parser.add_argument("-o", "--output", help="Output file")
+
+    args = parser.parse_args()
+
+    if args.output is not None and os.path.exists(args.output):
+        print('Output file already exists, aborted.')
+        exit(0)
+
+    if misp_client_cert == '':
+        misp_client_cert = None
+    else:
+        misp_client_cert = (misp_client_cert)
+
+    print("Collecting MISP data...")
+
+    misp = ExpandedPyMISP(misp_url, misp_key, misp_verifycert, cert=misp_client_cert)
+    result = misp.search(publish_timestamp=args.last, limit=args.limit, page=args.page, pythonify=True)
+
+    if not result:
+        print('No results for that time period')
+        exit(0)
+
+    if args.output:
+        with open(args.output, 'w') as f:
+            for r in result:
+                f.write(r.to_json() + '\n')
+    else:
+        for r in result:
+            pass
+            #print(r.to_json())
+
+    print("Preparing for Elastic...")
+    date = str(date.today())
+    elasticlist = []
+    for i in result:
+        elasticlist.append(i.to_json())
+
+    with open("raw_results_" + date + ".txt", 'w') as f:
+        events = 1
+        for i in result:
+            f.write("----------------------------------------------------------------" + '\n' +
+                    "Event: " + str(events) + '\n' +
+                    '----------------------------------------------------------------' + '\n' +
+                    i.to_json() + '\n' +
+                    '****************************************************************' + '\n')
+            events = events + 1
+
+    elastic = Elasticsearch("http://127.0.0.1:9200")
+    # or: elastic = Elasticsearch(hosts=["localhost"])
+
+    # mapping dictionary that contains the settings and
+    # _mapping schema for a new Elasticsearch index:
+    mapping = {
+        "settings": {
+            "number_of_shards": 2,
+            "number_of_replicas": 1
+        },
+        "mappings": {
+  "uuid": {
+    "type": "keyword"
+  },
+  "Attribute": {
+    "type": "nested",
+    "properties": {
+      "uuid": {
+        "type": "keyword"
+      },
+      "type": {
+        "type": "keyword"
+      },
+      "value": {
+        "type": "keyword"
+      },
+      "category": {
+        "type": "keyword"
+      },
+      "to_ids": {
+        "type": "boolean"
+      },
+      "distribution": {
+        "type": "long"
+      },
+      "id": {
+        "type": "long"
+      },
+      "event_id": {
+        "type": "long"
+      },
+      "timestamp": {
+        "type": "long"
+      },
+      "sharing_group_id": {
+        "type": "long"
+      },
+      "disable_correlation": {
+        "type": "boolean"
+      },
+      "comment": {
+        "type": "keyword"
+      },
+      "deleted": {
+        "type": "boolean"
+      },
+      "object_id": {
+        "type": "long"
+      }
+    }
+  },
+  "Object": {
+    "type": "nested",
+    "properties": {
+      "name": {
+        "type": "keyword"
+      },
+      "meta-category": {
+        "type": "keyword"
+      },
+      "template_uuid": {
+        "type": "keyword"
+      },
+      "description": {
+        "type": "keyword"
+      },
+      "template_version": {
+        "type": "long"
+      },
+      "uuid": {
+        "type": "keyword"
+      },
+      "Attribute": {
+        "type": "nested",
+        "properties": {
+          "uuid": {
+            "type": "keyword"
+          },
+          "object_relation": {
+            "type": "keyword"
+          },
+          "value": {
+            "type": "keyword"
+          },
+          "type": {
+            "type": "keyword"
+          },
+          "disable_correlation": {
+            "type": "boolean"
+          },
+          "to_ids": {
+            "type": "boolean"
+          },
+          "category": {
+            "type": "keyword"
+          },
+          "distribution": {
+            "type": "long"
+          },
+          "id": {
+            "type": "long"
+          },
+          "event_id": {
+            "type": "long"
+          },
+          "timestamp": {
+            "type": "long"
+          },
+          "sharing_group_id": {
+            "type": "long"
+          },
+          "comment": {
+            "type": "keyword"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "object_id": {
+            "type": "long"
+          }
+        }
+      },
+      "distribution": {
+        "type": "long"
+      },
+      "sharing_group_id": {
+        "type": "long"
+      },
+      "timestamp": {
+        "type": "long"
+      },
+      "id": {
+        "type": "long"
+      },
+      "event_id": {
+        "type": "long"
+      },
+      "comment": {
+        "type": "keyword"
+      },
+      "deleted": {
+        "type": "boolean"
+      }
+    }
+  },
+  "RelatedEvent": {
+    "type": "nested",
+    "properties": {
+      "Event": {
+        "type": "object",
+        "properties": {
+          "uuid": {
+            "type": "keyword"
+          },
+          "info": {
+            "type": "keyword"
+          },
+          "distribution": {
+            "type": "long"
+          },
+          "threat_level_id": {
+            "type": "long"
+          },
+          "analysis": {
+            "type": "long"
+          },
+          "published": {
+            "type": "boolean"
+          },
+          "date": {
+            "type": "date"
+          },
+          "id": {
+            "type": "long"
+          },
+          "orgc_id": {
+            "type": "long"
+          },
+          "org_id": {
+            "type": "long"
+          },
+          "timestamp": {
+            "type": "long"
+          },
+          "Org": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "long"
+              },
+              "name": {
+                "type": "keyword"
+              },
+              "uuid": {
+                "type": "keyword"
+              }
+            }
+          },
+          "Orgc": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "long"
+              },
+              "name": {
+                "type": "keyword"
+              },
+              "uuid": {
+                "type": "keyword"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "Tag": {
+    "type": "nested",
+    "properties": {
+      "id": {
+        "type": "long"
+      },
+      "name": {
+        "type": "keyword"
+      },
+      "colour": {
+        "type": "keyword"
+      },
+      "exportable": {
+        "type": "boolean"
+      },
+      "hide_tag": {
+        "type": "boolean"
+      },
+      "user_id": {
+        "type": "long"
+      },
+      "is_galaxy": {
+        "type": "boolean"
+      },
+      "is_custom_galaxy": {
+        "type": "boolean"
+      },
+      "local_only": {
+        "type": "boolean"
+      },
+      "local": {
+        "type": "long"
+      }
+    }
+  },
+  "info": {
+    "type": "keyword"
+  },
+  "distribution": {
+    "type": "long"
+  },
+  "threat_level_id": {
+    "type": "long"
+  },
+  "analysis": {
+    "type": "long"
+  },
+  "published": {
+    "type": "boolean"
+  },
+  "date": {
+    "type": "date"
+  },
+  "id": {
+    "type": "long"
+  },
+  "orgc_id": {
+    "type": "long"
+  },
+  "org_id": {
+    "type": "long"
+  },
+  "timestamp": {
+    "type": "long"
+  },
+  "publish_timestamp": {
+    "type": "long"
+  },
+  "sharing_group_id": {
+    "type": "long"
+  },
+  "Org": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "long"
+      },
+      "name": {
+        "type": "keyword"
+      },
+      "uuid": {
+        "type": "keyword"
+      },
+      "local": {
+        "type": "boolean"
+      }
+    }
+  },
+  "Orgc": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "long"
+      },
+      "name": {
+        "type": "keyword"
+      },
+      "uuid": {
+        "type": "keyword"
+      },
+      "local": {
+        "type": "boolean"
+      }
+    }
+  },
+  "attribute_count": {
+    "type": "long"
+  },
+  "proposal_email_lock": {
+    "type": "boolean"
+  },
+  "locked": {
+    "type": "boolean"
+  },
+  "disable_correlation": {
+    "type": "boolean"
+  },
+  "extends_uuid": {
+    "type": "keyword"
+  }
+}
+    }
+
+    print("Creating index...")
+    index_name = "bae_misp_"
+    # make an API call to the Elasticsearch cluster
+    # and have it return a response:
+    response = elastic.indices.create(
+        index=index_name + date,
+        body=mapping,
+        ignore=400  # ignore 400 already exists code
+    )
+
+    if 'acknowledged' in response:
+        if response['acknowledged'] == True:
+            #print("INDEX MAPPING SUCCESS FOR INDEX:", response['index'])
+            pass
+
+    # catch API error response
+    elif 'error' in response:
+        #print("ERROR:", response['error']['root_cause'])
+        #print("TYPE:", response['error']['type'])
+        pass
+
+    # print out the response:
+    #print('\nresponse:', response)
+    print("Sending data to Elastic...")
+    feednum = 1
+    for i in result:
+        feed = i.to_json()
+        doc = feed
+        resp = elastic.index(index=index_name + date, id=feednum, body=doc)
+        #print(resp['result'])
+        feednum = feednum + 1
+        feed = ""
+    print("Done!")
+    print("Index name: " + index_name + date)
+    print("Index link: http://localhost:9200/" + index_name + date + "/_search?pretty=true")
+
+
